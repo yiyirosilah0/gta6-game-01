@@ -1,143 +1,180 @@
-// Meridian Heat — the screenshot scenes behind ?shot=cover|chase|mission|start.
-// Each one plays the real rules forward from a fresh world, steered by a simple
-// autopilot (walk to the nearest parked car, steal it, then drive a route of
-// intersections toward a target), so the frame is what real play looks like and
-// the same seed always gives the same frame.
-import { DOCKS, STEP, WAREHOUSE } from './config.js';
-import { nearestIntersection } from './city.js';
-import { SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The screenshot scenes behind ?shot=start|drive|chase|mission. Each one plays
+// the real rules forward from a fresh world for a fixed number of steps, steered
+// by a simple autopilot, so the frame is what a short game really looks like
+// and the same seed always gives the same frame.
+import { STEP } from './config.js';
+import { SCREEN_PLAY, SCREEN_TITLE } from './config.js';
 
-const IDLE = { x: 0, y: 0, run: false, enter: false, punch: false };
+const BLANK = { moveX: 0, moveY: 0, run: false, up: false, down: false, left: false, right: false, enter: false, punch: false };
 
-/** A greedy Manhattan route of intersections from `from` to `to`, then `to`. */
-function routeWaypoints(from, to) {
-  const pts = [];
-  let cur = nearestIntersection(from.x, from.y);
-  pts.push(cur);
-  const target = nearestIntersection(to.x, to.y);
-  while (cur.x !== target.x || cur.y !== target.y) {
-    if (cur.x !== target.x) cur = { x: cur.x + Math.sign(target.x - cur.x) * 320, y: cur.y };
-    else cur = { x: cur.x, y: cur.y + Math.sign(target.y - cur.y) * 320 };
-    pts.push(cur);
-  }
-  pts.push(to);
-  return pts;
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
 
-function toward(from, to) {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const len = Math.hypot(dx, dy) || 1;
-  return { x: dx / len, y: dy / len, run: false, enter: false, punch: false };
-}
-
-function nearestParkedCar(state) {
-  const p = state.player;
+function putPlayerInCar(world, x, y) {
+  const p = world.state.player;
   let best = null;
-  let bestD = Infinity;
-  for (const car of state.cars) {
-    if (car.kind !== 'parked') continue;
-    const d = Math.hypot(car.x - p.x, car.y - p.y);
-    if (d < bestD) { bestD = d; best = car; }
+  let bd = Infinity;
+  for (const car of world.state.cars) {
+    if (car.kind === 'cop' || car.wrecked) continue;
+    const d = (car.x - x) * (car.x - x) + (car.y - y) * (car.y - y);
+    if (d < bd) { bd = d; best = car; }
   }
-  return best;
+  if (!best) return false;
+  best.kind = 'player';
+  best.color = '#ff8c1a';
+  p.inCar = best.id;
+  p.x = best.x;
+  p.y = best.y;
+  p.angle = best.angle;
+  return true;
 }
 
-/** Drive the player's car along `waypoints` with a screen-relative input. */
-function driveInput(state, waypoints) {
-  const car = state.player.inCar;
-  if (!car) return IDLE;
-  let wp = waypoints[0];
-  while (waypoints.length > 1 && Math.hypot(wp.x - car.x, wp.y - car.y) < 70) {
-    waypoints.shift();
-    wp = waypoints[0];
+// Drive the player's car along the road graph, always moving: steer at the
+// next waypoint, brake for a sharp turn, lift off for a car ahead, and pick a
+// new far node whenever the current one is reached, so the car never parks.
+// Speed is capped and eased near turns so the car stays on the road instead
+// of overshooting into buildings; if it does leave the road, it steers back
+// to the nearest road point before resuming its route. The route is kept
+// across steps with a waypoint index that only advances, so the car never
+// aims back at a node it already passed and never cuts a corner through a
+// building.
+function makeDriveAutopilot(world) {
+  let destNode = null;
+  let route = null;
+  let wpIdx = 0;
+  function setDestination(city, car, dest) {
+    destNode = dest;
+    const start = city.nearestNode(car.x, car.y);
+    route = city.route(start, destNode);
+    wpIdx = 0;
   }
-  return toward(car, wp);
-}
-
-/** Put a cop car behind the player's car so the chase reads in the frame. */
-function placeCopBehind(state, lateral, which) {
-  const p = state.player;
-  let seen = 0;
-  for (const car of state.cars) {
-    if (car.kind !== 'cop') continue;
-    if (seen < (which || 0)) { seen += 1; continue; }
-    const back = p.angle + Math.PI;
-    car.x = p.x + Math.cos(back) * 240 + Math.cos(back + Math.PI / 2) * lateral;
-    car.y = p.y + Math.sin(back) * 240 + Math.sin(back + Math.PI / 2) * lateral;
-    car.angle = p.angle;
-    car.speed = 320;
-    return;
-  }
-}
-
-function stealAndDrive(world, target, driveSeconds, wanted) {
-  const state = world.state;
-  // Phase 1: walk the streets to the nearest parked car and steal it.
-  const targetCar = nearestParkedCar(state);
-  if (targetCar) {
-    const waypoints = routeWaypoints(state.player, targetCar);
-    for (let i = 0; i < 20 / STEP; i += 1) {
-      if (state.player.inCar) break;
-      const d = Math.hypot(targetCar.x - state.player.x, targetCar.y - state.player.y);
-      if (d < 50) {
-        world.step(STEP, { x: 0, y: 0, run: false, enter: true, punch: false }, false);
-      } else {
-        let wp = waypoints[0];
-        while (waypoints.length > 1 && Math.hypot(wp.x - state.player.x, wp.y - state.player.y) < 40) {
-          waypoints.shift();
-          wp = waypoints[0];
-        }
-        const input = toward(state.player, wp);
-        input.run = true;
-        world.step(STEP, input, false);
+  return () => {
+    const p = world.state.player;
+    const car = world.state.cars.find((c) => c.id === p.inCar);
+    if (!car) return { ...BLANK };
+    const city = world.city;
+    if (destNode === null) setDestination(city, car, city.nearestNode(2240, 1440));
+    const dest = city.nodes[destNode];
+    if (Math.hypot(dest.x - car.x, dest.y - car.y) < 80) {
+      // Reached it: head for the farthest node next, and keep driving.
+      let best = destNode;
+      let bd = 0;
+      for (let i = 0; i < city.nodes.length; i += 1) {
+        const d = Math.hypot(city.nodes[i].x - car.x, city.nodes[i].y - car.y);
+        if (d > bd) { bd = d; best = i; }
+      }
+      setDestination(city, car, best);
+    }
+    // Advance the waypoint while the car is close to it, or closer to the
+    // next one than to it (it has passed it). Adjacent nodes are joined by
+    // one straight road, so aiming at the next node from anywhere on the
+    // current stretch still keeps the car on the road.
+    while (wpIdx < route.length - 1) {
+      const wp = city.nodes[route[wpIdx]];
+      const d = Math.hypot(wp.x - car.x, wp.y - car.y);
+      if (d < 60) { wpIdx += 1; continue; }
+      const next = city.nodes[route[wpIdx + 1]];
+      if (Math.hypot(next.x - car.x, next.y - car.y) < d) { wpIdx += 1; continue; }
+      break;
+    }
+    // Aim point: the current waypoint, or the nearest road point when the
+    // car has left the road, so it recovers instead of grinding a wall.
+    let aimX;
+    let aimY;
+    if (!city.isRoad(car.x, car.y)) {
+      const rp = city.nearestRoadPoint(car.x, car.y);
+      aimX = rp.x;
+      aimY = rp.y;
+    } else {
+      const aim = city.nodes[route[Math.min(wpIdx, route.length - 1)]];
+      aimX = aim.x;
+      aimY = aim.y;
+    }
+    const want = Math.atan2(aimY - car.y, aimX - car.x);
+    const diff = angleDiff(want, car.angle);
+    const speed = Math.abs(car.speed);
+    const dist = Math.hypot(aimX - car.x, aimY - car.y);
+    // Desired speed: slow for a sharp turn or near the waypoint.
+    let desired = 260;
+    if (Math.abs(diff) > 0.5) desired = 120;
+    if (dist < 150) desired = Math.min(desired, 150);
+    // A slow car ahead: lift off so the chase does not rear-end traffic.
+    let blocked = false;
+    for (const other of world.state.cars) {
+      if (other === car || other.wrecked) continue;
+      const od = Math.hypot(other.x - car.x, other.y - car.y);
+      if (od < 60) {
+        const ahead = (other.x - car.x) * Math.cos(car.angle) + (other.y - car.y) * Math.sin(car.angle);
+        if (ahead > 0) { blocked = true; break; }
       }
     }
-  }
-  if (state.player.inCar && wanted > 0) state.wanted = wanted;
-  // Phase 2: drive toward the target (downtown, so the camera stays centred).
-  const waypoints = routeWaypoints(state.player, target);
-  for (let i = 0; i < driveSeconds / STEP; i += 1) {
-    world.step(STEP, driveInput(state, waypoints), false);
-    if (state.over) break;
+    if (blocked) desired = Math.min(desired, 80);
+    return {
+      ...BLANK,
+      up: speed < desired,
+      down: speed > desired + 50,
+      left: diff < -0.08,
+      right: diff > 0.08,
+    };
+  };
+}
+
+// Walk toward a point, sliding along walls the way the world's own movement
+// already allows.
+function walkAutopilot(world, tx, ty) {
+  const p = world.state.player;
+  const dx = tx - p.x;
+  const dy = ty - p.y;
+  const d = Math.hypot(dx, dy);
+  if (d < 10) return { ...BLANK };
+  return { ...BLANK, moveX: dx / d, moveY: dy / d, run: d > 120 };
+}
+
+function runSteps(world, seconds, inputFn) {
+  const steps = Math.round(seconds / STEP);
+  for (let i = 0; i < steps; i += 1) {
+    world.step(STEP, inputFn ? inputFn() : { ...BLANK }, false);
   }
 }
 
 /**
- * Set `world` to the named scene and return the screen to draw over it and the
- * best haul to show.
+ * Set `world` to the named scene (start, drive, chase or mission; any other
+ * name is start) and return the screen to draw over it.
  */
 export function stageShot(name, world) {
   world.reset();
-  const state = world.state;
-  if (name === 'cover') {
-    stealAndDrive(world, { x: 1440, y: 1120 }, 14, 2);
-    placeCopBehind(state, 90, 0);
-    return { screen: SCREEN_PLAY, best: 0 };
+  if (name === 'drive') {
+    // Downtown, behind the wheel: steal the nearest car and keep driving.
+    putPlayerInCar(world, 800, 800);
+    runSteps(world, 12, makeDriveAutopilot(world));
+    return { screen: SCREEN_PLAY };
   }
   if (name === 'chase') {
-    stealAndDrive(world, { x: 1440, y: 1120 }, 6, 3);
-    // Evasive driving: fresh waypoints around downtown.
-    const waypoints = routeWaypoints(state.player, { x: 1120, y: 800 });
-    for (let i = 0; i < 10 / STEP; i += 1) {
-      world.step(STEP, driveInput(state, waypoints), false);
-      if (state.over) break;
-    }
-    placeCopBehind(state, 110, 0);
-    placeCopBehind(state, -110, 1);
-    return { screen: SCREEN_PLAY, best: 0 };
+    // Three stars and the cops in the mirror. The mission is Lose the Heat in
+    // its "lose" stage, which has no target, so it cannot complete mid-chase
+    // and hijack the scene the way Hot Wheels did.
+    world.state.missionIndex = 2;
+    world.startMission();
+    putPlayerInCar(world, 1280, 960);
+    runSteps(world, 9, makeDriveAutopilot(world));
+    return { screen: SCREEN_PLAY };
   }
   if (name === 'mission') {
-    state.missionIndex = 1;
-    state.missionStep = 0;
-    state.player.x = WAREHOUSE.x;
-    state.player.y = WAREHOUSE.y + 110;
-    state.player.angle = -Math.PI / 2;
-    // Five seconds of ambient play: the opening banner fades out first.
-    for (let i = 0; i < 5 / STEP; i += 1) world.step(STEP, IDLE, true);
-    return { screen: SCREEN_PLAY, best: 0 };
+    // On foot at the warehouse: the Package mission, closing on its marker
+    // from just west of it so the walk stays short and clear.
+    world.state.missionIndex = 1;
+    world.startMission();
+    const p = world.state.player;
+    p.x = 2240 - 130;
+    p.y = 320;
+    runSteps(world, 3, () => walkAutopilot(world, 2240, 320));
+    return { screen: SCREEN_PLAY };
   }
-  // start: the title screen over a living city.
-  for (let i = 0; i < 5 / STEP; i += 1) world.step(STEP, IDLE, true);
-  return { screen: SCREEN_TITLE, best: 0 };
+  // The title: the city lives behind the panel for five seconds.
+  for (let i = 0; i < Math.round(5 / STEP); i += 1) world.step(STEP, { ...BLANK }, true);
+  return { screen: SCREEN_TITLE };
 }

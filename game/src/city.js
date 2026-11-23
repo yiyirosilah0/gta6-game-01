@@ -1,132 +1,171 @@
-// Meridian Heat — the city of Meridian Bay: a street grid, blocks of buildings,
-// two parks, the docks, the beach and the sea. Generation is seeded, so the same
-// seed always builds the same city. Also the collision and road helpers the
-// simulation and the renderer share.
-import { BEACH_Y, COLORS, DOCKS, HORIZONTAL_Y, POLICE_HQ, SAFEHOUSE, VERTICAL_X, WATER_Y, WORLD } from './config.js';
+// Meridian Bay itself: a seeded city on a street grid. The generator lays out
+// roads, blocks of buildings, parks, the Docks container yard, the beach and
+// the sea, then builds the road graph the traffic cars and the screenshot
+// autopilot drive on. Same seed, same city, every time.
+import { AVENUES, BEACH_TOP, COLORS, LANDMARKS, ROAD_W, STREETS, WORLD } from './config.js';
 
-const HALF = 36; // half a road width
+function isRoad(x, y) {
+  for (const ax of AVENUES) if (Math.abs(x - ax) <= ROAD_W / 2) return true;
+  for (const sy of STREETS) if (Math.abs(y - sy) <= ROAD_W / 2) return true;
+  return false;
+}
+
+function nearestRoadPoint(x, y) {
+  let bx = AVENUES[0];
+  let bd = Math.abs(x - bx);
+  for (const ax of AVENUES) {
+    const d = Math.abs(x - ax);
+    if (d < bd) { bd = d; bx = ax; }
+  }
+  let by = STREETS[0];
+  bd = Math.abs(y - by);
+  for (const sy of STREETS) {
+    const d = Math.abs(y - sy);
+    if (d < bd) { bd = d; by = sy; }
+  }
+  return { x: bx, y: by };
+}
 
 export function createCity(random) {
   const buildings = [];
-  const containers = [];
   const trees = [];
+  const containers = [];
   const parks = [];
-  // Two park blocks, fixed so the map reads the same every run.
-  const parkCells = new Set(['2,1', '5,3']);
-  for (let col = 0; col < VERTICAL_X.length - 1; col += 1) {
-    for (let row = 0; row < HORIZONTAL_Y.length - 1; row += 1) {
-      const x0 = VERTICAL_X[col] + HALF + 14;
-      const x1 = VERTICAL_X[col + 1] - HALF - 14;
-      const y0 = HORIZONTAL_Y[row] + HALF + 14;
-      const y1 = HORIZONTAL_Y[row + 1] - HALF - 14;
-      if (parkCells.has(`${col},${row}`)) {
+
+  // Blocks are the cells between neighbouring avenues and streets. Each block
+  // holds either a row of buildings or a park; the beach strip stays open.
+  for (let ai = 0; ai < AVENUES.length - 1; ai += 1) {
+    for (let si = 0; si < STREETS.length - 1; si += 1) {
+      const x0 = AVENUES[ai] + ROAD_W / 2 + 8;
+      const x1 = AVENUES[ai + 1] - ROAD_W / 2 - 8;
+      const y0 = STREETS[si] + ROAD_W / 2 + 8;
+      const y1 = STREETS[si + 1] - ROAD_W / 2 - 8;
+      if (x1 - x0 < 60 || y1 - y0 < 60) continue;
+      if (random.next() < 0.18) {
         parks.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-        for (let t = 0; t < 9; t += 1) {
-          trees.push({ x: random.range(x0 + 16, x1 - 16), y: random.range(y0 + 16, y1 - 16), r: random.range(10, 16) });
+        const n = 3 + random.int(0, 4);
+        for (let t = 0; t < n; t += 1) {
+          trees.push({ x: x0 + 20 + random.next() * (x1 - x0 - 40), y: y0 + 20 + random.next() * (y1 - y0 - 40), r: 9 + random.next() * 7 });
         }
         continue;
       }
-      // Split each block into 2x2 lots; most hold a building, some hold trees.
-      const mx = (x0 + x1) / 2;
-      const my = (y0 + y1) / 2;
-      const lots = [
-        { x: x0, y: y0, w: mx - x0 - 8, h: my - y0 - 8 },
-        { x: mx + 8, y: y0, w: x1 - mx - 8, h: my - y0 - 8 },
-        { x: x0, y: my + 8, w: mx - x0 - 8, h: y1 - my - 8 },
-        { x: mx + 8, y: my + 8, w: x1 - mx - 8, h: y1 - my - 8 },
-      ];
-      for (const lot of lots) {
-        if (random.chance(0.82)) {
+      // Two rows of buildings down the block, with a gap between them.
+      const rows = 2;
+      for (let r = 0; r < rows; r += 1) {
+        const by0 = y0 + r * ((y1 - y0) / rows) + 6;
+        const by1 = y0 + (r + 1) * ((y1 - y0) / rows) - 6;
+        let bx = x0;
+        while (bx + 70 < x1) {
+          const bw = 60 + random.next() * 70;
+          const w = Math.min(bw, x1 - bx);
+          if (w < 48) break;
           buildings.push({
-            x: lot.x, y: lot.y, w: lot.w, h: lot.h,
-            color: random.pick(COLORS.building),
-            roof: random.pick(['#8a5a2b', '#5a6b7a', '#7a3b2e', '#3f5a3a']),
+            x: bx, y: by0, w, h: by1 - by0,
+            color: random.pick(COLORS.buildingRoof),
+            windows: random.int(2, 5),
           });
-        } else {
-          trees.push({ x: lot.x + lot.w / 2, y: lot.y + lot.h / 2, r: 14 });
+          bx += w + 14 + random.next() * 18;
         }
       }
     }
   }
-  // The docks: shipping containers on the east edge, solid obstacles.
-  for (let i = 0; i < 10; i += 1) {
+
+  // The Docks: a fenced yard of stacked containers on the east side.
+  for (let i = 0; i < 18; i += 1) {
     containers.push({
-      x: 2420 + (i % 2) * 58,
-      y: 700 + Math.floor(i / 2) * 62,
-      w: 48, h: 52,
-      color: COLORS.container[i % COLORS.container.length],
+      x: 2100 + (i % 6) * 62,
+      y: 1330 + Math.floor(i / 6) * 44,
+      w: 54, h: 36,
+      color: random.pick(COLORS.container),
     });
   }
-  // A few palm trees along the beach.
-  for (let x = 200; x < WORLD.width; x += 260) {
-    trees.push({ x: x + random.range(-30, 30), y: BEACH_Y + 22, r: 13, palm: true });
+
+  // Trees along the beach promenade.
+  for (let x = 200; x < WORLD.width - 100; x += 130) {
+    trees.push({ x: x + random.range(-20, 20), y: BEACH_TOP - 50, r: 11 });
   }
-  return { buildings, containers, trees, parks };
-}
 
-export function isRoad(x, y) {
-  for (const vx of VERTICAL_X) if (Math.abs(x - vx) <= HALF) return true;
-  for (const hy of HORIZONTAL_Y) if (Math.abs(y - hy) <= HALF) return true;
-  return false;
-}
-
-/** The nearest street intersection to a point (used for waypoints and spawns). */
-export function nearestIntersection(x, y) {
-  let best = null;
-  let bestD = Infinity;
-  for (const vx of VERTICAL_X) {
-    for (const hy of HORIZONTAL_Y) {
-      const d = (vx - x) * (vx - x) + (hy - y) * (hy - y);
-      if (d < bestD) { bestD = d; best = { x: vx, y: hy }; }
+  // The road graph: a node at every intersection, edges along every street.
+  // Traffic and the autopilot drive on it; each edge knows its direction so
+  // cars keep to the right-hand lane.
+  const nodes = [];
+  const nodeId = new Map();
+  for (const ax of AVENUES) {
+    for (const sy of STREETS) {
+      const key = `${ax},${sy}`;
+      nodeId.set(key, nodes.length);
+      nodes.push({ x: ax, y: sy });
     }
   }
-  return best;
-}
-
-/** All intersections, for random mission and job targets. */
-export function allIntersections() {
-  const out = [];
-  for (const vx of VERTICAL_X) for (const hy of HORIZONTAL_Y) out.push({ x: vx, y: hy });
-  return out;
-}
-
-/**
- * Push a circle out of every solid rect (buildings, containers, world edge and
- * the sea). Returns true when anything blocked the circle.
- */
-export function collideCircle(city, x, y, r) {
-  let blocked = false;
-  const push = (rect) => {
-    const cx = Math.max(rect.x, Math.min(x, rect.x + rect.w));
-    const cy = Math.max(rect.y, Math.min(y, rect.y + rect.h));
-    const dx = x - cx;
-    const dy = y - cy;
-    const d2 = dx * dx + dy * dy;
-    if (d2 >= r * r) return;
-    blocked = true;
-    if (d2 > 0.01) {
-      const d = Math.sqrt(d2);
-      const pushOut = (r - d) / d;
-      x += dx * pushOut;
-      y += dy * pushOut;
-    } else {
-      y = rect.y - r;
-    }
+  const edges = [];
+  const addEdge = (ax, ay, bx, by) => {
+    const a = nodeId.get(`${ax},${ay}`);
+    const b = nodeId.get(`${bx},${by}`);
+    if (a === undefined || b === undefined) return;
+    edges.push({ a, b });
   };
-  for (const b of city.buildings) push(b);
-  for (const c of city.containers) push(c);
-  if (x < r) { x = r; blocked = true; }
-  if (x > WORLD.width - r) { x = WORLD.width - r; blocked = true; }
-  if (y < r) { y = r; blocked = true; }
-  if (y > WATER_Y - r) { y = WATER_Y - r; blocked = true; }
-  return { x, y, blocked };
-}
+  for (let ai = 0; ai < AVENUES.length; ai += 1) {
+    for (let si = 0; si < STREETS.length - 1; si += 1) addEdge(AVENUES[ai], STREETS[si], AVENUES[ai], STREETS[si + 1]);
+  }
+  for (let si = 0; si < STREETS.length; si += 1) {
+    for (let ai = 0; ai < AVENUES.length - 1; ai += 1) addEdge(AVENUES[ai], STREETS[si], AVENUES[ai + 1], STREETS[si]);
+  }
+  const adjacency = nodes.map(() => []);
+  for (const e of edges) {
+    adjacency[e.a].push(e.b);
+    adjacency[e.b].push(e.a);
+  }
 
-/** True when a point is inside a building or a container. */
-export function insideSolid(city, x, y) {
-  for (const b of city.buildings) if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return true;
-  for (const c of city.containers) if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return true;
-  return false;
-}
+  function nearestNode(x, y) {
+    let best = 0;
+    let bd = Infinity;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const dx = nodes[i].x - x;
+      const dy = nodes[i].y - y;
+      const d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
 
-export const PLACES = { SAFEHOUSE, DOCKS, POLICE_HQ };
+  // Breadth-first route between two nodes, as a list of node indices.
+  function route(from, to) {
+    if (from === to) return [from];
+    const prev = new Array(nodes.length).fill(-1);
+    const queue = [from];
+    prev[from] = from;
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      if (cur === to) break;
+      for (const nb of adjacency[cur]) {
+        if (prev[nb] === -1) {
+          prev[nb] = cur;
+          queue.push(nb);
+        }
+      }
+    }
+    if (prev[to] === -1) return [from, to];
+    const path = [];
+    let cur = to;
+    while (cur !== from) {
+      path.unshift(cur);
+      cur = prev[cur];
+    }
+    path.unshift(from);
+    return path;
+  }
+
+  return {
+    buildings,
+    trees,
+    containers,
+    parks,
+    nodes,
+    adjacency,
+    landmarks: LANDMARKS,
+    isRoad,
+    nearestRoadPoint,
+    nearestNode,
+    route,
+  };
+}
